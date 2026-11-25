@@ -117,6 +117,8 @@ Each key is a separate `LedgerEntry` with its own independently tracked TTL.
 | `("SREC", id)`        | `SocialRecoveryRequest` | Guardian-quorum recovery request      | 518,400 / 17,280                 | ~0.052 XLM                   |
 | `("ABST", id, owner)` | `u32`              | Per-owner abstention weight per proposal; participation-only and never approval weight | 518,400 / 17,280 | ~0.052 XLM |
 | `("SOFT", id, owner)` | `u32`              | Per-owner soft-approval participation weight; never approval/quorum weight | 518,400 / 17,280 | ~0.052 XLM |
+| `("PCOMM", id)`       | `Vec<ProposalComment>` | Bounded proposal comments (up to 50 entries, 500 text bytes each) | 518,400 / 17,280 | ~0.052 XLM |
+| `("PDISC", id)`       | `DiscussionReference` | Optional off-chain discussion URI and integrity hash | 518,400 / 17,280 | ~0.052 XLM |
 
 ### Proposal Struct Fields
 
@@ -264,7 +266,8 @@ The contract records an explicit **storage-schema version** in instance storage 
 | `3` | `migrate_storage` | Rebuildable incoming-delegation weight index (`("DLGWT", delegate)`) supporting the incoming delegation weight cap and expiry renewal. |
 | `4` | `initialize`, `migrate_storage` | Per-asset outflow pause flags (`("OPAUSE", token)`), which reject treasury outflows for one asset while leaving governance and unrelated assets available. |
 | `5` | `initialize`, `migrate_storage` | Staged-upgrade record (`UPGSTG`) holding the pending WASM hash, staging timestamp, first co-signer, and `execute_after` derived from `TLOCK`. |
-| `6` (current) | `initialize`, `migrate_storage` | Recursive `ProposalKind::Batch(Vec<ProposalKind>)` stored inside `("PROP", id)`; no new top-level storage key. |
+| `6` | `initialize`, `migrate_storage` | Recursive `ProposalKind::Batch(Vec<ProposalKind>)` stored inside `("PROP", id)`; no new top-level storage key. |
+| `7` (current) | `initialize`, `migrate_storage`, `migrate_to_v7` | Proposal comments (`("PCOMM", id)`) and optional discussion references (`("PDISC", id)`). Missing keys read as empty/none, so no backfill is needed. |
 
 **Upgrade path between versions:**
 
@@ -275,6 +278,7 @@ The contract records an explicit **storage-schema version** in instance storage 
 - **`3` → `4`:** run `migrate_storage(approvers, 3, 4)`. No backfill is needed because a missing `("OPAUSE", token)` key reads as `false`; the migration stamps `STOVER = 4`.
 - **`4` → `5`:** run `migrate_storage(approvers, 4, 5)`. No backfill is needed because a missing `UPGSTG` key already means "no staged upgrade"; the migration stamps `STOVER = 5`.
 - **`5` → `6`:** run `migrate_storage(approvers, 5, 6)`. No backfill is needed because no new storage key is introduced; the recursive batch proposal kind only affects the serialized shape of `("PROP", id)` records written after the upgrade, and the migration stamps `STOVER = 6`.
+- **`6` → `7`:** run `migrate_storage(approvers, 6, 7)` or the compatibility entrypoint `migrate_to_v7(approvers)`. No backfill is needed: absent comment and discussion keys read as an empty list and `None`, respectively; the migration stamps `STOVER = 7`.
 
 Because the version key lives in the shared instance entry, it is bumped by the same threshold-and-bump policy as every other instance key (see [Bump-on-Access Strategy and Configuration](#bump-on-access-strategy-and-configuration)).
 

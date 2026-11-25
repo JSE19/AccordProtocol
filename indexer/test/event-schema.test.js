@@ -54,7 +54,7 @@ describe("schema registry", () => {
   it("covers every catalogued topic at every version, plus unversioned", () => {
     assert.deepEqual([...registry.topics()].sort(), Object.keys(eventCatalog).sort());
     for (const topic of registry.topics()) {
-      assert.deepEqual(registry.versions(topic), [1, 2, UNVERSIONED]);
+      assert.deepEqual(registry.versions(topic), [1, 2, 3, 4, UNVERSIONED]);
       assert.equal(registry.get(topic, CURRENT_EVENT_SCHEMA_VERSION).fields.version, "u32");
     }
   });
@@ -63,7 +63,11 @@ describe("schema registry", () => {
     assert.equal("transfers" in registry.get("executed", 2).fields, false);
     assert.equal(registry.get("executed", 1).fields.transfers, "Vec<Transfer>");
     // Other events are identical across versions 1 and 2.
-    assert.deepEqual(registry.get("approved", 1).fields, registry.get("approved", 2).fields);
+    assert.deepEqual(registry.get("approved", 1).fields, registry.get("approved", 4).fields);
+    assert.deepEqual(registry.get("comment", 3).fields, {});
+    assert.equal(registry.get("comment", 4).fields.text, "String");
+    assert.deepEqual(registry.get("abstain", 2).fields, {});
+    assert.equal(registry.get("abstain", 3).fields.participation_weight, "u32");
   });
 
   it("models pre-versioning events as version 1 without the version marker", () => {
@@ -74,11 +78,11 @@ describe("schema registry", () => {
 
   it("returns null for unknown topics and versions and describes itself for the API", () => {
     assert.equal(registry.get("nope", 2), null);
-    assert.equal(registry.get("executed", 3), null);
+    assert.equal(registry.get("executed", 5), null);
     assert.equal(registry.hasTopic("nope"), false);
     const executed = registry.describe().find(({ topic }) => topic === "executed");
-    assert.deepEqual(executed.versions.map(({ version }) => version), ["unversioned", "1", "2"]);
-    assert.deepEqual(executed.versions.map(({ current }) => current), [false, false, true]);
+    assert.deepEqual(executed.versions.map(({ version }) => version), ["unversioned", "1", "2", "3", "4"]);
+    assert.deepEqual(executed.versions.map(({ current }) => current), [false, false, false, false, true]);
   });
 
   it("accepts new schemas and refuses malformed registrations", () => {
@@ -98,6 +102,34 @@ describe("payload validation", () => {
   it("accepts a conforming payload", () => {
     assert.deepEqual(check("executed", 2, executedV2), []);
     assert.deepEqual(check("executed", 1, executedV1), []);
+  });
+
+  it("validates participation and proposal discussion events at their introduction versions", () => {
+    assert.deepEqual(check("abstain", 3, {
+      id: 7,
+      abstainer: sender,
+      abstention_count: 1,
+      weight: 2,
+      cumulative_abstention_weight: 2,
+      participation_weight: 2,
+      version: 3,
+    }), []);
+    assert.deepEqual(check("comment", 4, {
+      proposal_id: 7,
+      comment_id: 1,
+      author: sender,
+      text: "reviewed",
+      reference_hash: null,
+      timestamp: 100,
+      version: 4,
+    }), []);
+    assert.deepEqual(check("discref", 4, {
+      proposal_id: 7,
+      setter: sender,
+      uri: "https://example.test/thread",
+      hash: null,
+      version: 4,
+    }), []);
   });
 
   it("accepts integers however they were decoded", () => {
@@ -184,10 +216,10 @@ describe("event classification", () => {
   });
 
   it("quarantines a schema version it has never heard of", () => {
-    const { record } = classify(accordEvent({ topic: "executed", payload: { ...executedV2, version: 3 } }));
+    const { record } = classify(accordEvent({ topic: "executed", payload: { ...executedV2, version: 5 } }));
     assert.equal(record.reason, "unknown_version");
-    assert.equal(record.schemaVersion, 3);
-    assert.match(record.errors[0], /registered: unversioned, 1, 2|registered: 1, 2, unversioned/);
+    assert.equal(record.schemaVersion, 5);
+    assert.match(record.errors[0], /registered: unversioned, 1, 2, 3, 4|registered: 1, 2, 3, 4, unversioned/);
   });
 
   it("quarantines malformed payloads with every violation listed", () => {
@@ -285,7 +317,7 @@ describeEachBackend("quarantine store", () => {
   it("filters, orders and counts", async () => {
     const store = await createStore();
     await store.quarantineEvent(record());
-    await store.quarantineEvent(classify(accordEvent({ topic: "executed", payload: { ...executedV2, version: 3 } })).record);
+    await store.quarantineEvent(classify(accordEvent({ topic: "executed", payload: { ...executedV2, version: 5 } })).record);
     await store.quarantineEvent(classify(accordEvent({ topic: "executed", payload: { id: "x", version: 2 } })).record);
 
     const reasons = (rows) => rows.map(({ reason }) => reason);

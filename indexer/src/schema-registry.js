@@ -14,13 +14,98 @@
  */
 import { eventCatalog } from "./catalog.js";
 
-export const CURRENT_EVENT_SCHEMA_VERSION = 2;
+export const CURRENT_EVENT_SCHEMA_VERSION = 4;
 
 /**
  * What each version bump did, newest first. `removed` fields existed before the
  * bump and not after; `added` ones are new in it. Used to reconstruct old versions.
  */
 export const SCHEMA_CHANGES = [
+  {
+    version: 4,
+    topic: "comment",
+    added: {
+      proposal_id: "u64",
+      comment_id: "u32",
+      author: "Address",
+      text: "String",
+      reference_hash: "Option<BytesN<32>>",
+      timestamp: "u64",
+      version: "u32",
+    },
+  },
+  {
+    version: 4,
+    topic: "discref",
+    added: {
+      proposal_id: "u64",
+      setter: "Address",
+      uri: "String",
+      hash: "Option<BytesN<32>>",
+      version: "u32",
+    },
+  },
+  {
+    version: 4,
+    topic: "disc_clr",
+    added: {
+      proposal_id: "u64",
+      clearer: "Address",
+      version: "u32",
+    },
+  },
+  {
+    version: 3,
+    topic: "abstain",
+    added: {
+      id: "u64",
+      abstainer: "Address",
+      abstention_count: "u32",
+      weight: "u32",
+      cumulative_abstention_weight: "u32",
+      participation_weight: "u32",
+      version: "u32",
+    },
+  },
+  {
+    version: 3,
+    topic: "unabst",
+    added: {
+      id: "u64",
+      abstainer: "Address",
+      abstention_count: "u32",
+      weight: "u32",
+      cumulative_abstention_weight: "u32",
+      participation_weight: "u32",
+      version: "u32",
+    },
+  },
+  {
+    version: 3,
+    topic: "softapr",
+    added: {
+      id: "u64",
+      supporter: "Address",
+      soft_approval_count: "u32",
+      weight: "u32",
+      cumulative_soft_weight: "u32",
+      participation_weight: "u32",
+      version: "u32",
+    },
+  },
+  {
+    version: 3,
+    topic: "unsftap",
+    added: {
+      id: "u64",
+      supporter: "Address",
+      soft_approval_count: "u32",
+      weight: "u32",
+      cumulative_soft_weight: "u32",
+      participation_weight: "u32",
+      version: "u32",
+    },
+  },
   { version: 2, topic: "executed", removed: { transfers: "Vec<Transfer>" } },
 ];
 

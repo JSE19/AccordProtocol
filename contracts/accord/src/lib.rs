@@ -1656,15 +1656,15 @@ pub enum ContractError {
     RecoveryDelayActive = 89,
     // ── #945: Proposal comments & discussions ──
     /// Comment cannot be empty.
-    EmptyComment = 90,
+    EmptyComment = 130,
     /// Comment text exceeds maximum allowed length.
-    CommentTooLong = 91,
+    CommentTooLong = 131,
     /// Proposal comment limit reached.
-    TooManyComments = 92,
+    TooManyComments = 132,
     /// Discussion reference URI is invalid.
-    InvalidDiscussionReference = 93,
+    InvalidDiscussionReference = 133,
     /// Discussion reference URI exceeds maximum allowed length.
-    DiscussionReferenceTooLong = 94,
+    DiscussionReferenceTooLong = 134,
     /// Thrown when a DEX swap declares an empty or malformed path.
     InvalidSwapPath = 90,
     /// Thrown when a swap deadline is invalid or already passed.
@@ -1790,6 +1790,7 @@ fn write_comments(env: &Env, proposal_id: u64, comments: &Vec<ProposalComment>) 
     let key = comments_key(proposal_id);
     env.storage().persistent().set(&key, comments);
     bump_persistent(env, &key);
+    bump_instance(env);
 }
 
 fn read_discussion_reference(env: &Env, proposal_id: u64) -> Option<DiscussionReference> {
@@ -1806,11 +1807,13 @@ fn write_discussion_reference(env: &Env, proposal_id: u64, reference: &Discussio
     let key = discussion_ref_key(proposal_id);
     env.storage().persistent().set(&key, reference);
     bump_persistent(env, &key);
+    bump_instance(env);
 }
 
 fn clear_discussion_reference_internal(env: &Env, proposal_id: u64) {
     let key = discussion_ref_key(proposal_id);
     env.storage().persistent().remove(&key);
+    bump_instance(env);
 }
 
 fn proposal_key(id: u64) -> (Symbol, u64) {
@@ -1955,16 +1958,18 @@ pub const DEFAULT_OWNER_ROLES: [Role; 3] = [Role::Proposer, Role::Approver, Role
 /// Version 4 adds the per-asset outflow pause index.
 /// Version 5 adds the staged-upgrade record.
 /// Version 6 adds atomic multi-action batch proposals.
-const STORAGE_SCHEMA_VERSION: u32 = 6;
+/// Version 7 adds proposal comments and discussion references.
+const STORAGE_SCHEMA_VERSION: u32 = 7;
 
 /// Every storage layout this contract can read or migrate to. `0` is the
 /// pre-versioning legacy layout, `1` added weighted governance/RBAC, `2` added
 /// scoped freezes, guardian-quorum recovery requests, and the rotation proposal
 /// kind, `3` added the incoming delegated-weight index, `4` added the
-/// per-asset outflow pause index, `5` added the staged-upgrade record, and `6`
-/// added atomic multi-action batch proposals. A version outside this list is
-/// unknown and must be refused.
-pub const SUPPORTED_STORAGE_VERSIONS: [u32; 7] = [0, 1, 2, 3, 4, 5, 6];
+/// per-asset outflow pause index, `5` added the staged-upgrade record, `6`
+/// added atomic multi-action batch proposals, and `7` added proposal comments
+/// and discussion references. A version outside this list is unknown and must
+/// be refused.
+pub const SUPPORTED_STORAGE_VERSIONS: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
 
 /// Minimum delay between a `RotateOwner` proposal reaching quorum and its
 /// activation. Gives the existing owner key time to object before handoff.
@@ -1991,7 +1996,8 @@ const MAX_GUARDIANS: u32 = 10;
 ///       list remains available in `ProposalCreatedEvent` and on-chain state.
 ///   3 — adds abstention events and participation fields to the abstention
 ///       views. Abstentions are participation records and never approval weight.
-pub const EVENT_SCHEMA_VERSION: u32 = 3;
+///   4 — adds proposal-comment and discussion-reference events.
+pub const EVENT_SCHEMA_VERSION: u32 = 4;
 
 fn max_single_owner_weight_pct_key() -> Symbol {
     symbol_short!("MAXOWNP")
@@ -7175,29 +7181,23 @@ impl AccordContract {
         read_last_rebalance(&env)
     }
 
-    /// One-time migration that stamps storage schema to version 7 for legacy
-    /// deployments.
+    /// Migrates schema version 6 to version 7, adding comments and discussion
+    /// references. No backfill is required because missing keys read as empty.
+    pub fn migrate_to_v7(
+        env: Env,
+        approvers: Vec<Address>,
+    ) -> Result<(), ContractError> {
+        let current = read_storage_version(&env);
+        Self::migrate_storage(env, approvers, current, 7)
+    }
+
+    /// Compatibility alias for deployments that used the earlier migration
+    /// entrypoint name.
     pub fn migrate_to_odr(
         env: Env,
         approvers: Vec<Address>,
     ) -> Result<(), ContractError> {
-        if !is_initialized(&env) {
-            return Err(ContractError::NotInitialized);
-        }
-        if read_storage_version(&env) >= 7 {
-            return Err(ContractError::AlreadyMigrated);
-        }
-        require_weighted_approvers(&env, &approvers)?;
-        write_storage_version(&env);
-        env.events().publish(
-            (Symbol::new(&env, "odr_migrated"),),
-            GovernanceMigratedEvent {
-                version: EVENT_SCHEMA_VERSION,
-                owner_count: read_owners_map(&env)?.len(),
-                total_weight: read_total_weight(&env),
-            },
-        );
-        Ok(())
+        Self::migrate_to_v7(env, approvers)
     }
     /// Records `ready_at` the first time the threshold is crossed.
     pub fn approve(env: Env, approver: Address, proposal_id: u64) -> Result<(), ContractError> {
@@ -11273,29 +11273,11 @@ impl AccordContract {
         Ok(())
     }
 
-    /// One-time migration for schema version 3 (proposal comments and discussion references).
-    /// Requires distinct registered owners whose combined weight reaches threshold.
+    /// Compatibility entrypoint for schema version 3. Uses the registered
+    /// migration path so the delegated-weight index is rebuilt before stamping.
     pub fn migrate_to_v3(env: Env, approvers: Vec<Address>) -> Result<(), ContractError> {
-        if !is_initialized(&env) {
-            return Err(ContractError::NotInitialized);
-        }
         let current = read_storage_version(&env);
-        if current >= 3 {
-            return Err(ContractError::AlreadyMigrated);
-        }
-        if current == 0 {
-            return Err(ContractError::LegacyMigrationRequired);
-        }
-        if current < 2 {
-            return Err(ContractError::SkippedSchemaVersion);
-        }
-        require_weighted_approvers(&env, &approvers)?;
-        write_storage_version_value(&env, 3);
-        env.events().publish(
-            (symbol_short!("v3_migr"),),
-            3_u32,
-        );
-        Ok(())
+        Self::migrate_storage(env, approvers, current, 3)
     }
 
     /// Returns the current approval threshold.

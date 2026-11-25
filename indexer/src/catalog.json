@@ -217,5 +217,83 @@
       "after": "Vec<Role>",
       "version": "u32"
     }
+  },
+  "abstain": {
+    "struct": "ProposalAbstainedEvent",
+    "fields": {
+      "id": "u64",
+      "abstainer": "Address",
+      "abstention_count": "u32",
+      "weight": "u32",
+      "cumulative_abstention_weight": "u32",
+      "participation_weight": "u32",
+      "version": "u32"
+    }
+  },
+  "unabst": {
+    "struct": "ProposalAbstentionRevokedEvent",
+    "fields": {
+      "id": "u64",
+      "abstainer": "Address",
+      "abstention_count": "u32",
+      "weight": "u32",
+      "cumulative_abstention_weight": "u32",
+      "participation_weight": "u32",
+      "version": "u32"
+    }
+  },
+  "softapr": {
+    "struct": "ProposalSoftApprovedEvent",
+    "fields": {
+      "id": "u64",
+      "supporter": "Address",
+      "soft_approval_count": "u32",
+      "weight": "u32",
+      "cumulative_soft_weight": "u32",
+      "participation_weight": "u32",
+      "version": "u32"
+    }
+  },
+  "unsftap": {
+    "struct": "ProposalSoftApprovalRevokedEvent",
+    "fields": {
+      "id": "u64",
+      "supporter": "Address",
+      "soft_approval_count": "u32",
+      "weight": "u32",
+      "cumulative_soft_weight": "u32",
+      "participation_weight": "u32",
+      "version": "u32"
+    }
+  },
+  "comment": {
+    "struct": "ProposalCommentAddedEvent",
+    "fields": {
+      "proposal_id": "u64",
+      "comment_id": "u32",
+      "author": "Address",
+      "text": "String",
+      "reference_hash": "Option<BytesN<32>>",
+      "timestamp": "u64",
+      "version": "u32"
+    }
+  },
+  "discref": {
+    "struct": "ProposalDiscussionReferenceSetEvent",
+    "fields": {
+      "proposal_id": "u64",
+      "setter": "Address",
+      "uri": "String",
+      "hash": "Option<BytesN<32>>",
+      "version": "u32"
+    }
+  },
+  "disc_clr": {
+    "struct": "ProposalDiscussionReferenceClearedEvent",
+    "fields": {
+      "proposal_id": "u64",
+      "clearer": "Address",
+      "version": "u32"
+    }
   }
 }

@@ -6,7 +6,10 @@
 extern crate std;
 
 use super::*;
-use soroban_sdk::testutils::{Address as _, Events, Ledger as _, MockAuth, MockAuthInvoke};
+use soroban_sdk::testutils::{
+    storage::{Instance as _, Persistent as _},
+    Address as _, Events, Ledger as _, MockAuth, MockAuthInvoke,
+};
 use proptest::prelude::*;
 use soroban_sdk::{token, xdr, Address, Bytes, BytesN, Env, IntoVal, String, Vec};
 use std::format;
@@ -438,6 +441,244 @@ fn setup_three_owner_weighted(
     token_sac.mint(&contract_id, &1_000_000_000_000_i128);
 
     (env, client, owner_a, owner_b, owner_c, token_client)
+}
+
+#[test]
+fn proposal_comments_enforce_authorization_limits_and_emit_versioned_events() {
+    let (env, client, owner_a, _, _, non_owner, token_client) = setup(2);
+    let proposal_id = client.create_proposal(
+        &owner_a,
+        &t(&env, &Address::generate(&env), 1, &token_client.address),
+        &str(&env, "comment limits"),
+        &DEADLINE,
+        &ProposalCategory::Transfer,
+    );
+
+    assert_eq!(
+        client.try_add_comment(&non_owner, &proposal_id, &str(&env, "unauthorized"), &None),
+        Err(Ok(ContractError::Unauthorized))
+    );
+    assert_eq!(
+        client.try_add_comment(&owner_a, &proposal_id, &str(&env, ""), &None),
+        Err(Ok(ContractError::EmptyComment))
+    );
+
+    let max_text = std::string::String::from("x").repeat(MAX_COMMENT_LEN as usize);
+    let max_text = str(&env, &max_text);
+    assert_eq!(
+        client.try_add_comment(&owner_a, &proposal_id, &max_text, &None),
+        Ok(Ok(1))
+    );
+    let contract_events = env.events().all().filter_by_contract(&client.address);
+    let event_data = match &contract_events.events().last().unwrap().body {
+        xdr::ContractEventBody::V0(body) => body.data.clone(),
+    };
+    let event: ProposalCommentAddedEvent = event_data.into_val(&env);
+    assert_eq!(event.proposal_id, proposal_id);
+    assert_eq!(event.comment_id, 1);
+    assert_eq!(event.version, EVENT_SCHEMA_VERSION);
+
+    let too_long = std::string::String::from("x").repeat(MAX_COMMENT_LEN as usize + 1);
+    assert_eq!(
+        client.try_add_comment(&owner_a, &proposal_id, &str(&env, &too_long), &None),
+        Err(Ok(ContractError::CommentTooLong))
+    );
+
+    for _ in 1..MAX_COMMENTS_PER_PROPOSAL {
+        client.add_comment(&owner_a, &proposal_id, &str(&env, "ok"), &None);
+    }
+    assert_eq!(client.get_comment_count(&proposal_id), MAX_COMMENTS_PER_PROPOSAL);
+    assert_eq!(
+        client.try_add_comment(&owner_a, &proposal_id, &str(&env, "one too many"), &None),
+        Err(Ok(ContractError::TooManyComments))
+    );
+}
+
+#[test]
+fn proposal_comments_follow_frozen_and_proposal_status_checks() {
+    let (env, client, owner_a, owner_b, _, non_owner, token_client) = setup(2);
+    let proposal_id = client.create_proposal(
+        &owner_a,
+        &t(&env, &Address::generate(&env), 1, &token_client.address),
+        &str(&env, "comment authorization"),
+        &DEADLINE,
+        &ProposalCategory::Transfer,
+    );
+    client.set_discussion_reference(
+        &owner_a,
+        &proposal_id,
+        &str(&env, "https://example.test/thread"),
+        &None,
+    );
+    let guardian = Address::generate(&env);
+    let approvers = Vec::from_array(&env, [owner_a.clone(), owner_b.clone()]);
+    client.set_guardian(&approvers, &guardian);
+    client.freeze(&guardian);
+
+    assert_eq!(
+        client.try_add_comment(&owner_a, &proposal_id, &str(&env, "frozen"), &None),
+        Err(Ok(ContractError::ContractFrozen))
+    );
+    assert_eq!(
+        client.try_add_comment(&non_owner, &proposal_id, &str(&env, "not an owner"), &None),
+        Err(Ok(ContractError::ContractFrozen))
+    );
+    assert_eq!(
+        client.try_set_discussion_reference(
+            &owner_a,
+            &proposal_id,
+            &str(&env, "https://example.test/other"),
+            &None,
+        ),
+        Err(Ok(ContractError::ContractFrozen))
+    );
+    assert_eq!(
+        client.try_clear_discussion_reference(&owner_a, &proposal_id),
+        Err(Ok(ContractError::ContractFrozen))
+    );
+    assert_eq!(
+        client.try_set_discussion_reference(
+            &non_owner,
+            &proposal_id,
+            &str(&env, "https://example.test/other"),
+            &None,
+        ),
+        Err(Ok(ContractError::ContractFrozen))
+    );
+    client.unfreeze(&approvers);
+    assert_eq!(
+        client.try_add_comment(&non_owner, &proposal_id, &str(&env, "not an owner"), &None),
+        Err(Ok(ContractError::Unauthorized))
+    );
+    assert_eq!(
+        client.try_set_discussion_reference(
+            &non_owner,
+            &proposal_id,
+            &str(&env, "https://example.test/other"),
+            &None,
+        ),
+        Err(Ok(ContractError::Unauthorized))
+    );
+
+    client.approve(&owner_a, &proposal_id);
+    client.approve(&owner_b, &proposal_id);
+    client.execute(&owner_a, &proposal_id);
+    assert_eq!(
+        client.try_add_comment(&owner_a, &proposal_id, &str(&env, "closed"), &None),
+        Err(Ok(ContractError::ProposalNotActive))
+    );
+}
+
+#[test]
+fn discussion_references_validate_permissions_and_clear_cleanly() {
+    let (env, client, owner_a, owner_b, _, non_owner, token_client) = setup(2);
+    let proposal_id = client.create_proposal(
+        &owner_a,
+        &t(&env, &Address::generate(&env), 1, &token_client.address),
+        &str(&env, "discussion link"),
+        &DEADLINE,
+        &ProposalCategory::Transfer,
+    );
+
+    assert_eq!(
+        client.try_set_discussion_reference(
+            &non_owner,
+            &proposal_id,
+            &str(&env, "https://example.test/thread"),
+            &None,
+        ),
+        Err(Ok(ContractError::Unauthorized))
+    );
+    assert_eq!(
+        client.try_set_discussion_reference(&owner_a, &proposal_id, &str(&env, ""), &None),
+        Err(Ok(ContractError::InvalidDiscussionReference))
+    );
+    let too_long = std::string::String::from("x").repeat(MAX_DISCUSSION_URI_LEN as usize + 1);
+    assert_eq!(
+        client.try_set_discussion_reference(
+            &owner_a,
+            &proposal_id,
+            &str(&env, &too_long),
+            &None,
+        ),
+        Err(Ok(ContractError::DiscussionReferenceTooLong))
+    );
+
+    let hash = Some(BytesN::from_array(&env, &[7_u8; 32]));
+    let uri = str(&env, "https://example.test/thread");
+    client.set_discussion_reference(&owner_a, &proposal_id, &uri, &hash);
+    let stored = client.get_discussion_reference(&proposal_id).unwrap();
+    assert_eq!(stored.uri, uri);
+    assert_eq!(stored.hash, hash);
+    assert_eq!(stored.set_by, owner_a);
+
+    client.clear_discussion_reference(&owner_b, &proposal_id);
+    assert!(client.get_discussion_reference(&proposal_id).is_none());
+    assert_eq!(
+        client.try_clear_discussion_reference(&owner_b, &proposal_id),
+        Err(Ok(ContractError::InvalidDiscussionReference))
+    );
+}
+
+#[test]
+fn proposal_discussion_storage_bumps_persistent_and_instance_ttls() {
+    let (env, client, owner_a, _, _, _, token_client) = setup(2);
+    let proposal_id = client.create_proposal(
+        &owner_a,
+        &t(&env, &Address::generate(&env), 1, &token_client.address),
+        &str(&env, "discussion storage TTL"),
+        &DEADLINE,
+        &ProposalCategory::Transfer,
+    );
+    client.add_comment(&owner_a, &proposal_id, &str(&env, "retained comment"), &None);
+    client.set_discussion_reference(
+        &owner_a,
+        &proposal_id,
+        &str(&env, "https://example.test/thread"),
+        &None,
+    );
+
+    let (comments_ttl, reference_ttl, instance_ttl) = env.as_contract(&client.address, || {
+        (
+            env.storage()
+                .persistent()
+                .get_ttl(&comments_key(proposal_id)),
+            env.storage()
+                .persistent()
+                .get_ttl(&discussion_ref_key(proposal_id)),
+            env.storage().instance().get_ttl(),
+        )
+    });
+    assert!(comments_ttl >= PERSISTENT_BUMP);
+    assert!(reference_ttl >= PERSISTENT_BUMP);
+    assert!(instance_ttl >= INSTANCE_BUMP);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]
+
+    #[test]
+    fn proposal_comment_pagination_is_bounded(offset in 0_u32..20, limit in 0_u32..20) {
+        let (env, client, owner_a, _, _, _, token_client) = setup(2);
+        let proposal_id = client.create_proposal(
+            &owner_a,
+            &t(&env, &Address::generate(&env), 1, &token_client.address),
+            &str(&env, "comment pagination"),
+            &DEADLINE,
+            &ProposalCategory::Transfer,
+        );
+        for i in 0..5 {
+            client.add_comment(&owner_a, &proposal_id, &str(&env, &format!("comment {i}")), &None);
+        }
+
+        let comments = client.get_comments_paged(&proposal_id, &offset, &limit);
+        let expected = if limit == 0 || offset >= 5 {
+            0
+        } else {
+            (5 - offset).min(limit.min(50))
+        };
+        prop_assert_eq!(comments.len(), expected);
+    }
 }
 
 // ─── Initialization ──────────────────────────────────────────────────────────
@@ -11376,12 +11617,13 @@ fn permissionless_sweep_skips_live_proposals_and_is_idempotent_while_frozen() {
 fn storage_migration_registry_lists_supported_versions() {
     let (_, client, _, _, _, _, _) = setup(2);
     let supported = client.get_supported_storage_versions();
-    assert_eq!(supported.len(), 7);
+    assert_eq!(supported.len(), 8);
     assert!(supported.contains(0));
     assert!(supported.contains(3));
     assert!(supported.contains(4));
     assert!(supported.contains(5));
     assert!(supported.contains(6));
+    assert!(supported.contains(7));
     assert!(supported.contains(STORAGE_SCHEMA_VERSION));
     assert!(client.is_storage_version_supported(&STORAGE_SCHEMA_VERSION));
     assert!(!client.is_storage_version_supported(&99));
@@ -12174,7 +12416,7 @@ fn test_treasury_zero_limit_blocks_outflows() {
 }
 
 #[test]
-fn test_storage_version_6_and_migrate_to_v6() {
+fn test_storage_version_7_and_migrate_to_v7() {
     let (env, client, owner_a, owner_b, _, _, _) = setup(2);
 
     assert_eq!(client.get_storage_version(), STORAGE_SCHEMA_VERSION);
@@ -12183,25 +12425,37 @@ fn test_storage_version_6_and_migrate_to_v6() {
     approvers.push_back(owner_a.clone());
     approvers.push_back(owner_b.clone());
     assert_eq!(
-        client.try_migrate_storage(&approvers, &6, &6),
+        client.try_migrate_storage(&approvers, &7, &7),
         Err(Ok(ContractError::AlreadyMigrated))
     );
 
     env.as_contract(&client.address, || {
-        env.storage().instance().set(&storage_version_key(), &5_u32);
+        env.storage().instance().set(&storage_version_key(), &6_u32);
     });
-    assert_eq!(client.get_storage_version(), 5);
+    assert_eq!(client.get_storage_version(), 6);
 
     let mut solo_approver = Vec::new(&env);
     solo_approver.push_back(owner_a.clone());
     assert_eq!(
-        client.try_migrate_storage(&solo_approver, &5, &6),
+        client.try_migrate_to_v7(&solo_approver),
         Err(Ok(ContractError::ThresholdNotMet))
     );
 
-    client.migrate_storage(&approvers, &5, &6);
-    assert_eq!(client.get_storage_version(), 6);
+    client.migrate_to_v7(&approvers);
+    assert_eq!(client.get_storage_version(), 7);
     assert!(client.get_pending_upgrade().is_none());
+    let contract_events = env.events().all().filter_by_contract(&client.address);
+    let event_data = match &contract_events.events().last().unwrap().body {
+        xdr::ContractEventBody::V0(body) => body.data.clone(),
+    };
+    let event: StorageMigratedEvent = event_data.into_val(&env);
+    assert_eq!(event.from_version, 6);
+    assert_eq!(event.to_version, 7);
+    assert_eq!(event.version, EVENT_SCHEMA_VERSION);
+    assert_eq!(
+        client.try_migrate_to_v7(&approvers),
+        Err(Ok(ContractError::AlreadyMigrated))
+    );
 }
 
 // ─── Adversarial & Property Tests for #940 & #939 ───────────────────────────

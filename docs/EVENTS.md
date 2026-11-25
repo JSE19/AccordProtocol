@@ -45,6 +45,9 @@ The events are mapped by their primary topic (a `symbol_short!` or `Symbol`) to 
 | `p_deps`        | `ProposalDependenciesSetEvent`   | `{ id: u64, dependencies: Vec<u64>, version: u32 }` |
 | `tr_lim`        | `TreasurySpendingLimitExecutedEvent` | `{ token: Address, previous_limit: Option<i128>, new_limit: i128, window_secs: u64, version: u32 }` |
 | `tr_spnt`       | `TreasurySpendTrackedEvent`      | `{ token: Address, amount: i128, total_spent_window: i128, total_spent_lifetime: i128, version: u32 }` |
+| `comment`       | `ProposalCommentAddedEvent`      | `{ proposal_id: u64, comment_id: u32, author: Address, text: String, reference_hash: Option<BytesN<32>>, timestamp: u64, version: u32 }` |
+| `discref`       | `ProposalDiscussionReferenceSetEvent` | `{ proposal_id: u64, setter: Address, uri: String, hash: Option<BytesN<32>>, version: u32 }` |
+| `disc_clr`      | `ProposalDiscussionReferenceClearedEvent` | `{ proposal_id: u64, clearer: Address, version: u32 }` |
 
 Every payload carries a trailing `version: u32` field holding the event-schema version (see [Event Versioning Policy](#event-versioning-policy)).
 
@@ -54,7 +57,7 @@ This catalog is loaded by the off-chain indexer to decode raw contract events de
 
 Every event payload includes a `version: u32` field set to `EVENT_SCHEMA_VERSION`, a single public constant in `contracts/accord/src/lib.rs`. It is the only place the version is defined; bump it there and every event picks up the new value.
 
-**Current version: `3`.** Version `1` was the first versioned schema; version `2` removed `transfers` from `ProposalExecutedEvent`; version `3` adds abstention participation events. Events emitted by deployments that predate the field have no `version`; consumers should treat a missing field as "unversioned" (the indexer stores it as `NULL`).
+**Current version: `4`.** Version `1` was the first versioned schema; version `2` removed `transfers` from `ProposalExecutedEvent`; version `3` adds abstention participation events; version `4` adds proposal-comment and discussion-reference events. Events emitted by deployments that predate the field have no `version`; consumers should treat a missing field as "unversioned" (the indexer stores it as `NULL`).
 
 ### When the version is bumped
 
@@ -65,6 +68,7 @@ Every event payload includes a `version: u32` field set to `EVENT_SCHEMA_VERSION
 | `1` | Initial versioned schema: every event struct gains `version`. |
 | `2` | `ProposalExecutedEvent` drops `transfers`; transfers remain in `ProposalCreatedEvent` and on-chain state. |
 | `3` | Adds `abstain`, `unabst`, `softapr`, and `unsftap` participation events. Abstentions and soft approvals never alter binding approval weight or quorum. |
+| `4` | Adds `comment`, `discref`, and `disc_clr` events for proposal comments and discussion references. |
 
 ### Additive and breaking changes
 
